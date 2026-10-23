@@ -23,6 +23,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 前の実行の終わりを待たされた場合も、その実行が保存した最新の既読記録を使う
+          ref: main
 
       - name: 新着を確認して通知
         env:
