@@ -132,7 +132,7 @@ def parse_time(s):
 
 def summarize(board, title, body):
     """3行の要約を返す。失敗したら (None, 理由) を返す。"""
-    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    key = env("GEMINI_API_KEY")
     if not key:
         return None, "GEMINI_API_KEY が未設定"
     prompt = (
@@ -148,7 +148,7 @@ def summarize(board, title, body):
         # 思考を浅くすると応答が数秒で返る(既定の深さだと数十秒〜タイムアウト)
         "generationConfig": {"temperature": 0.2, "thinkingConfig": {"thinkingLevel": "low"}},
     }
-    models = [os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_MODELS[0]]
+    models = [env("GEMINI_MODEL") or DEFAULT_MODELS[0]]
     models += [m for m in DEFAULT_MODELS if m not in models]
     errors = []
     for model in models:
@@ -192,8 +192,13 @@ def build_message(board, item, lines, ai_ok):
     return {"username": "AION2 公式新着", "embeds": [embed]}
 
 
+def env(name):
+    # Windows から登録した値に付きやすい BOM と前後の空白・改行を落とす
+    return os.environ.get(name, "").replace("﻿", "").strip()
+
+
 def webhook_url():
-    url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    url = env("DISCORD_WEBHOOK_URL")
     if not re.match(r"^https://(?:discord|discordapp)\.com/api/webhooks/", url):
         raise RuntimeError("DISCORD_WEBHOOK_URL が未設定か、Discord のウェブフック URL ではありません")
     return url
