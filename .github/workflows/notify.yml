@@ -1,0 +1,42 @@
+name: AION2 新着通知
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      latest:
+        description: "テスト用: 各掲示板の最新N件を既読に関係なく送る(0 で通常動作)"
+        default: "0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: notify
+  cancel-in-progress: false
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: 新着を確認して通知
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          LATEST: ${{ inputs.latest || '0' }}
+        run: python3 notify.py --latest "$LATEST"
+
+      - name: 既読の記録を保存
+        if: always()
+        run: |
+          git diff --quiet -- state.json && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "既読の記録を更新"
+          git push
