@@ -1,4 +1,4 @@
-"""AION2 公式サイトの新着記事を Gemini で3行に要約し、Discord に通知する。
+"""AION2 公式サイトの新着記事を Gemini で箇条書きに要約し、Discord に通知する。
 
 GitHub Actions から定期実行する前提。標準ライブラリだけで動く。
 
@@ -53,6 +53,7 @@ LIST_SIZE = 20  # 1回に見る件数
 MAX_PER_RUN = 5  # 1掲示板あたり1回に送る上限。状態ファイルが消えたときの大量送信を防ぐ
 KEEP_IDS = 300  # 掲示板ごとに覚えておく既読IDの数
 BODY_LIMIT = 15000  # 要約に渡す本文の最大文字数
+MAX_LINES = 10  # 要約の最大行数。行数は記事の中身に合わせて Gemini が決める
 # gemini-flash-latest(3.8)は 2026-10 時点の無料枠で応答が返らなかったため使わない
 DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-lite-latest"]
 
@@ -131,14 +132,17 @@ def parse_time(s):
 
 
 def summarize(board, title, body):
-    """3行の要約を返す。失敗したら (None, 理由) を返す。"""
+    """要約の行のリストを返す。失敗したら (None, 理由) を返す。"""
     key = env("GEMINI_API_KEY")
     if not key:
         return None, "GEMINI_API_KEY が未設定"
     prompt = (
         f"以下はオンラインゲーム『AION2』の公式サイトに載った「{board['label']}」の記事です。"
-        "プレイヤーが知るべき要点を日本語で3行に要約してください。\n"
-        "- ちょうど3行。1行は60文字以内。\n"
+        "プレイヤーが知るべき要点を日本語で、1行に1項目の箇条書きに要約してください。\n"
+        f"- 行数は記事の中身に合わせて1〜{MAX_LINES}行で決める。"
+        "要点が少ない記事は短く、アップデートノートのように項目が多い記事は"
+        f"重要なものから順に最大{MAX_LINES}行。行数を埋めるための水増しはしない。\n"
+        "- 1行は60文字以内。\n"
         "- 日時・期間・対象・報酬・変更点など具体的な情報を優先する。\n"
         "- 行頭に記号や番号を付けない。前置きや締めの文は書かない。\n\n"
         f"タイトル: {title}\n\n本文:\n{body[:BODY_LIMIT]}"
@@ -163,7 +167,7 @@ def summarize(board, title, body):
         lines = [re.sub(r"^\s*(?:[-*・•●]|\d+[.)、])\s*", "", l).strip() for l in text.splitlines()]
         lines = [l for l in lines if l]
         if lines:
-            return lines[:3], None
+            return lines[:MAX_LINES], None
         errors.append(f"{model}: 空の応答")
     return None, " / ".join(errors)
 

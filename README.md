@@ -1,6 +1,6 @@
 # AION2 新着通知
 
-AION2 公式サイト(日本語版)の「お知らせ」「アップデート」「イベント」に新しい記事が載ると、Gemini で3行に要約して Discord に送る。GitHub Actions が15分ごとに `notify.py` を実行する。
+AION2 公式サイト(日本語版)の「お知らせ」「アップデート」「イベント」に新しい記事が載ると、Gemini で箇条書きに要約して Discord に送る。行数は記事の中身に合わせて1〜10行で変わる(上限は `notify.py` の `MAX_LINES`)。GitHub Actions が15分ごとに `notify.py` を実行する。
 
 ## ファイル
 
