@@ -1,6 +1,6 @@
 # AION2 新着通知
 
-AION2 公式サイト(日本語版)の「お知らせ」「アップデート」「イベント」に新しい記事が載ると、Gemini で箇条書きに要約して Discord に送る。行数は記事の中身に合わせて1〜10行で変わる(上限は `notify.py` の `MAX_LINES`)。GitHub Actions が15分ごとに `notify.py` を実行する。
+AION2 公式サイト(日本語版)の「お知らせ」「アップデート」「イベント」に新しい記事が載ると、Gemini で箇条書きに要約して Discord に送る。行数は記事の中身に合わせて1〜10行で変わる(上限は `notify.py` の `MAX_LINES`)。cron-job.org が15分ごとに GitHub Actions を起動し、Actions が `notify.py` を実行する。
 
 ## ファイル
 
@@ -8,7 +8,7 @@ AION2 公式サイト(日本語版)の「お知らせ」「アップデート」
 |---|---|
 | `notify.py` | 3つの掲示板の新着を調べ、要約して Discord に送る |
 | `state.json` | 通知済みの記事ID。Actions が実行のたびに更新してコミットする |
-| `.github/workflows/notify.yml` | 15分ごと(毎時7・22・37・52分)の定期実行と手動実行の設定 |
+| `.github/workflows/notify.yml` | 外部・手動からの起動と、予備の定期実行(毎時7・22・37・52分)の設定 |
 
 ## 設定
 
@@ -19,6 +19,20 @@ AION2 公式サイト(日本語版)の「お知らせ」「アップデート」
 | `DISCORD_WEBHOOK_URL` | Secret | 通知先チャンネルのウェブフック URL |
 | `GEMINI_API_KEY` | Secret | Google AI Studio で発行した API キー |
 | `GEMINI_MODEL` | Variable(任意) | 要約に使うモデル。省略時は `gemini-3.5-flash` |
+
+## 外部からの起動(cron-job.org)
+
+GitHub の定期実行(`schedule`)は混雑時に実行を捨てるため、2026-10-23 の登録から約7時間で1回しか動かなかった。そこで cron-job.org から15分ごとに、次の API で Actions を起動している。`schedule` は予備として残してあり、両方から起動されても `concurrency` と `ref: main` によって二重通知にはならない。
+
+| 項目 | 値 |
+|---|---|
+| URL | `https://api.github.com/repos/toshisasak1/aion2-notice-bot/actions/workflows/notify.yml/dispatches` |
+| メソッド | `POST` |
+| ヘッダー | `Accept: application/vnd.github+json`<br>`Authorization: Bearer <トークン>`<br>`X-GitHub-Api-Version: 2026-03-10`<br>`Content-Type: application/json` |
+| 本文 | `{"ref":"main"}` |
+| 成功時の応答 | `200`(本文に起動した実行の ID が入る) |
+
+トークンは fine-grained personal access token で、対象はこのリポジトリだけ、権限は Actions の Read and write だけ。期限が切れると cron-job.org の実行が失敗し、失敗通知のメールが届く。そのときは同じ設定でトークンを作り直し、cron-job.org のジョブの `Authorization` ヘッダーを差し替える。
 
 ## 動き方
 
