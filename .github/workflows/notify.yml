@@ -2,7 +2,8 @@ name: AION2 新着通知
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # 毎時0分は Actions が混んで実行が遅れたり飛ばされたりするので、ずらして15分ごと
+    - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
     inputs:
       latest:

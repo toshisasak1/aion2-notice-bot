@@ -8,7 +8,7 @@ AION2 公式サイト(日本語版)の「お知らせ」「アップデート」
 |---|---|
 | `notify.py` | 3つの掲示板の新着を調べ、要約して Discord に送る |
 | `state.json` | 通知済みの記事ID。Actions が実行のたびに更新してコミットする |
-| `.github/workflows/notify.yml` | 15分ごとの定期実行と手動実行の設定 |
+| `.github/workflows/notify.yml` | 15分ごと(毎時7・22・37・52分)の定期実行と手動実行の設定 |
 
 ## 設定
 
