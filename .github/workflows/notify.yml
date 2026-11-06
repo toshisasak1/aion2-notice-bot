@@ -9,6 +9,10 @@ on:
       latest:
         description: "テスト用: 各掲示板の最新N件を既読に関係なく送る(0 で通常動作)"
         default: "0"
+      siege_test:
+        description: "テスト用: アーティファクト戦の直近の回を、日程と送信済みの記録に関係なく送る"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -35,12 +39,21 @@ jobs:
           LATEST: ${{ inputs.latest || '0' }}
         run: python3 notify.py --latest "$LATEST"
 
+      - name: アーティファクト戦の結果を通知
+        # 戦の後(月・木・土の21:40〜)でなければ、通信せずにすぐ終わる
+        if: always()
+        env:
+          # 専用のウェブフックが無ければ、新着通知と同じチャンネルに送る
+          DISCORD_WEBHOOK_URL: ${{ secrets.SIEGE_WEBHOOK_URL || secrets.DISCORD_WEBHOOK_URL }}
+          SIEGE_TEST: ${{ inputs.siege_test && '--test' || '' }}
+        run: python3 siege.py $SIEGE_TEST
+
       - name: 既読の記録を保存
         if: always()
         run: |
-          git diff --quiet -- state.json && exit 0
+          git diff --quiet -- state.json siege_state.json && exit 0
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
+          git add state.json siege_state.json
           git commit -m "既読の記録を更新"
           git push
