@@ -178,8 +178,6 @@ def build_message(region, start, pairs):
         "description": (head + "\n\n" + "\n".join(lines))[:4000],
         "color": 0x8B5CF6,
         "fields": [{"name": "今回の勝敗", "value": tally}],
-        "footer": {"text": "出典: DaevaOS(Companion 利用者がゲーム内で読んだ記録。運営者の許可を得て掲載)"},
-        "timestamp": start.isoformat().replace("+00:00", "Z"),
     }
     return {"username": "アーティファクト戦", "embeds": [embed]}, len(current)
 
