@@ -2,7 +2,7 @@
 
 DaevaOS の運営者の許可を得て、戦が終わったあとにページを1回だけ読む。どの組み合わせも
 まだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
-GitHub Actions で notify.py と同じ起動(cron-job.org から1時間ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
+GitHub Actions で notify.py と同じ起動(cron-job.org から30分ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
 
 環境変数:
   DISCORD_WEBHOOK_URL  送り先のウェブフック URL(--dry-run では不要)
@@ -30,7 +30,7 @@ REGIONS = {
     "GLOBAL_ASIA": {
         "label": "アジア",
         "tz": timezone(timedelta(hours=9)),
-        "weekdays": (0, 3, 5),  # 月・木・土
+        "weekdays": (3, 5),  # 木・土(2026-11-04 のアップデートで月曜はなくなった)
         "start": (21, 0),
     },
 }
