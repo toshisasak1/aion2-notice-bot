@@ -182,7 +182,7 @@ def fallback_lines(item, body):
 
 def build_message(board, item, lines, ai_ok):
     cid = item["snow"]["contentId"]
-    footer = f"{board['label']} ・ " + ("Gemini で要約" if ai_ok else "AI要約に失敗したため本文冒頭を表示")
+    footer = board["label"] if ai_ok else f"{board['label']} ・ AI要約に失敗したため本文冒頭を表示"
     embed = {
         "title": item["title"][:256],
         "url": board["view"].format(cid=cid),
