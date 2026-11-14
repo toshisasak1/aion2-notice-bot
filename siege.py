@@ -237,7 +237,7 @@ def align(matching, pairs, start):
 
 def build_message(region, start, matching, rows):
     side_l, side_r = matching["left"], matching["right"]
-    lines, wins, n_current = [], {"L": 0, "R": 0, None: 0}, 0
+    lines, missing, wins, n_current = [], [], {"L": 0, "R": 0, None: 0}, 0
     for row in rows:
         rec = row["rec"]
         if rec and rec["current"]:
@@ -252,8 +252,11 @@ def build_message(region, start, matching, rows):
             prev = ""
             # 前回の結果は、今の組み合わせになってからの記録だけ載せる
             if rec and rec["score"] and rec["ended"] and rec["ended"] >= matching["posted"]:
-                prev = f"、前回 {date_label(rec['ended'], region)} {rec['score'][0]}-{rec['score'][1]}"
-            lines.append(f"➖➖➖　{row['left']} － {row['right']}(記録なし{prev})")
+                prev = f"(前回 {date_label(rec['ended'], region)} {rec['score'][0]}-{rec['score'][1]})"
+            missing.append(f"{row['left']}－{row['right']}{prev}")
+    if missing:
+        # 記録の無い組は1行にまとめ、記録のある組の後に置く
+        lines.append(("\n" if lines else "") + "記録なし: " + "、".join(missing))
 
     head = (f"左が{side_l}、右が{side_r}のサーバー。"
             "数字と■は、戦の終わりにアーティファクトを持っていた数(🟦左、🟥右、⬜なし)。")
