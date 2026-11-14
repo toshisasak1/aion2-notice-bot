@@ -367,7 +367,7 @@ def main():
             continue
 
         if args.dry_run:
-            print(f"{name} (dry-run) 記録 {n_current}/{len(pairs)} 組")
+            print(f"{name} (dry-run) 記録 {n_current}/{len(rows)} 組")
             print(json.dumps(message, ensure_ascii=False, indent=2))
             continue
         try:
@@ -376,7 +376,7 @@ def main():
             print(f"{name} Discord への送信に失敗: {e}")
             failed = True
             continue
-        print(f"{name} 通知しました(記録 {n_current}/{len(pairs)} 組)")
+        print(f"{name} 通知しました(記録 {n_current}/{len(rows)} 組)")
         if keep_state:
             rs["posted"] = sid
             rs["reads"] = {}
