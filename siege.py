@@ -1,5 +1,8 @@
 """AION2 アーティファクト戦の結果を DaevaOS から読み、組み合わせごとの一覧を Discord に送る。
 
+組み合わせは2週間ほどで変わるので、送る前に毎回、公式のお知らせ「サーバーマッチングのご案内」の
+最新版を読み、そのアビスの表の順に全組を並べる。DaevaOS に記録が無い組は「記録なし」と出す。
+
 DaevaOS の運営者の許可を得て、戦が終わったあとにページを1回だけ読む。どの組み合わせも
 まだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
 GitHub Actions で notify.py と同じ起動(cron-job.org から30分ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
@@ -19,7 +22,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from notify import post_discord, webhook_url
+from notify import BOARDS, fetch_body, http_json, parse_time, post_discord, webhook_url
 
 PAGE = "https://daevaos.com/statistics/artifact-siege"
 UA = "Mozilla/5.0 (compatible; aion2-siege-bot/1.0; +https://github.com/toshisasak1/aion2-notice-bot)"
@@ -43,7 +46,19 @@ WEEKDAYS_JA = "月火水木金土日"
 MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
 FACTION = {"elyos": "天族", "asmodian": "魔族"}
-SQUARE = {"elyos": "🟦", "asmodian": "🟥", None: "⬜"}
+SQUARE = {"L": "🟦", "R": "🟥", None: "⬜"}  # 左のサーバー、右のサーバー、どちらも持っていない
+
+NOTICE_BOARD = next(b for b in BOARDS if b["key"] == "notice")
+MATCHING_TITLE = "サーバーマッチング"
+MATCHING_PAGES = 3  # お知らせを20件ずつ、この回数まで遡って探す
+# 公式のお知らせのサーバー名(日本語)と、DaevaOS の表示名。サーバーが増えたらここに足す
+SERVER_NAMES = {
+    "シエル": "Siel", "アリエル": "Ariel", "イズラフェル": "Israphel", "ルミエル": "Lumiel",
+    "ネザカン": "Nezekan", "ネモン": "Nemon", "ジケル": "Zikel", "マルクタン": "Marchutan",
+    "バイゼル": "Vaizel", "エレスギガル": "Ereshkigal", "カイジネル": "Kaisinel", "ヒタニエ": "Hithanya",
+    "ユスティエル": "Yustiel", "トリニエル": "Triniel", "フレギオン": "Fregion", "ナニア": "Nania",
+    "ミスランテイダ": "Meslamtaeda", "アスフェル": "Azphel", "ベリトラ": "Beritra", "ハダル": "Hadala",
+}
 
 
 def fetch_page(retries=2):
@@ -61,6 +76,54 @@ def fetch_page(retries=2):
             last = RuntimeError(f"通信エラー {PAGE}: {e}")
         time.sleep(5 * (attempt + 1))
     raise last
+
+
+def parse_matching(body):
+    """「サーバーマッチングのご案内」の本文から、アビスの表の列名と組み合わせを読む。"""
+    m = re.search(r"■\s*アビス(.*?)(?=\n■|\Z)", body, re.S)
+    if not m:
+        raise RuntimeError("本文に「■ アビス」の表がありません")
+    cells = [c.strip() for c in m.group(1).splitlines() if c.strip() and c.strip() != "|"]
+    first = next((i for i, c in enumerate(cells) if c.isdigit()), None)
+    if first is None or first < 2:
+        raise RuntimeError("アビスの表の行が読めません")
+    left, right = cells[first - 2], cells[first - 1]  # 見出しの「西部」「東部」
+    pairs, rows = [], cells[first:]
+    for i in range(0, len(rows) - 2, 3):
+        num, a, b = rows[i:i + 3]
+        if not num.isdigit():
+            break
+        pairs.append((a, b))
+    names = [n for p in pairs for n in p]
+    if not pairs or len(set(names)) != len(names):
+        raise RuntimeError("アビスの表の組み合わせが読めません")
+    return left, right, pairs
+
+
+def fetch_matching(before):
+    """before より前に出た、最新の「サーバーマッチングのご案内」を公式のお知らせから読む。"""
+    found, prev = [], 0
+    for _ in range(MATCHING_PAGES):
+        items = http_json(
+            f"{NOTICE_BOARD['api']}/article/search/moreArticle"
+            f"?isVote=true&moreSize=20&moreDirection=BEFORE&previousArticleId={prev}"
+        )["contentList"]
+        found += [it for it in items if MATCHING_TITLE in it["title"]
+                  and parse_time(it["timestamps"]["postedAt"]) <= before]
+        if found or not items:
+            break
+        prev = items[-1]["id"]
+    if not found:
+        raise RuntimeError(f"お知らせに「{MATCHING_TITLE}」が見つかりません")
+    item = max(found, key=lambda it: it["timestamps"]["postedAt"])
+    left, right, pairs = parse_matching(fetch_body(NOTICE_BOARD, item["id"]))
+    return {
+        "title": item["title"],
+        "posted": parse_time(item["timestamps"]["postedAt"]),
+        "left": left,
+        "right": right,
+        "pairs": pairs,
+    }
 
 
 def parse_ended(text):
@@ -134,44 +197,72 @@ def date_label(dt, region, with_time=False):
     return label + local.strftime(" %H:%M") if with_time else label
 
 
-def score_text(pair):
-    return f"{pair['score']['elyos']}-{pair['score']['asmodian']}"
-
-
-def bar(pair):
-    holders = pair["holders"] or [None] * 3
-    order = {"elyos": 0, None: 1, "asmodian": 2}
+def bar(holders):
+    holders = holders or [None] * 3
+    order = {"L": 0, None: 1, "R": 2}
     return "".join(SQUARE[h] for h in sorted(holders, key=lambda h: order[h]))
 
 
-def winner(pair):
-    e, a = pair["score"]["elyos"], pair["score"]["asmodian"]
-    return "elyos" if e > a else "asmodian" if a > e else None
+def align(matching, pairs, start):
+    """公式の組ごとに、DaevaOS の記録を公式の表の左・右に合わせて並べる。
+
+    DaevaOS は同じ陣営どうしの組で片方を反対の陣営として表示するので、陣営ではなく
+    サーバー名で左右を決める。公式の組に無い DaevaOS の今回の記録は、2つ目の戻り値で返す。
+    """
+    rows, used = [], set()
+    for left, right in matching["pairs"]:
+        en = {SERVER_NAMES.get(left), SERVER_NAMES.get(right)}
+        for name in (left, right):
+            if name not in SERVER_NAMES:
+                print(f"  SERVER_NAMES に無いサーバー: {name}(この組は記録なしになる)")
+        rec = None
+        for i, p in enumerate(pairs):
+            if None in en or {p.get("elyos"), p.get("asmodian")} != en:
+                continue
+            used.add(i)
+            side_l = "elyos" if p["elyos"] == SERVER_NAMES[left] else "asmodian"
+            side_r = "asmodian" if side_l == "elyos" else "elyos"
+            rec = {
+                "ended": p["ended"],
+                "current": is_current(p, start),
+                "score": (p["score"][side_l], p["score"][side_r]) if len(p["score"]) == 2 else None,
+                "holders": ["L" if h == side_l else "R" if h == side_r else None for h in p["holders"]],
+            }
+            break
+        rows.append({"left": left, "right": right, "rec": rec})
+    stray = [(p.get("elyos"), p.get("asmodian")) for i, p in enumerate(pairs)
+             if i not in used and is_current(p, start)]
+    return rows, stray
 
 
-def build_message(region, start, pairs):
-    lines, wins = [], {"elyos": 0, "asmodian": 0, None: 0}
-    current = [p for p in pairs if is_current(p, start)]
-    for p in pairs:
-        if p in current:
-            w = winner(p)
+def build_message(region, start, matching, rows):
+    side_l, side_r = matching["left"], matching["right"]
+    lines, wins, n_current = [], {"L": 0, "R": 0, None: 0}, 0
+    for row in rows:
+        rec = row["rec"]
+        if rec and rec["current"]:
+            n_current += 1
+            a, b = rec["score"]
+            w = "L" if a > b else "R" if b > a else None
             wins[w] += 1
-            left = f"**{p['elyos']}**" if w == "elyos" else p["elyos"]
-            right = f"**{p['asmodian']}**" if w == "asmodian" else p["asmodian"]
-            lines.append(f"{bar(p)}　{left}　{score_text(p)}　{right}")
+            left = f"**{row['left']}**" if w == "L" else row["left"]
+            right = f"**{row['right']}**" if w == "R" else row["right"]
+            lines.append(f"{bar(rec['holders'])}　{left}　{a}-{b}　{right}")
         else:
             prev = ""
-            if p["ended"] and len(p["score"]) == 2:
-                prev = f"、前回 {date_label(p['ended'], region)} {score_text(p)}"
-            lines.append(f"➖➖➖　{p['elyos']} － {p['asmodian']}(記録なし{prev})")
+            # 前回の結果は、今の組み合わせになってからの記録だけ載せる
+            if rec and rec["score"] and rec["ended"] and rec["ended"] >= matching["posted"]:
+                prev = f"、前回 {date_label(rec['ended'], region)} {rec['score'][0]}-{rec['score'][1]}"
+            lines.append(f"➖➖➖　{row['left']} － {row['right']}(記録なし{prev})")
 
-    head = "左が天族、右が魔族。数字と■は、戦の終わりにアーティファクトを持っていた数(🟦天族、🟥魔族、⬜なし)。"
-    if not current:
-        head += "\n今回はどの組み合わせも記録されていません。前回までの結果を載せています。"
-    tally = f"天族 {wins['elyos']}勝 ・ 魔族 {wins['asmodian']}勝"
+    head = (f"左が{side_l}、右が{side_r}のサーバー。"
+            "数字と■は、戦の終わりにアーティファクトを持っていた数(🟦左、🟥右、⬜なし)。")
+    if not n_current:
+        head += "\n今回はどの組み合わせも記録されていません。"
+    tally = f"{side_l} {wins['L']}勝 ・ {side_r} {wins['R']}勝"
     if wins[None]:
         tally += f" ・ 引き分け {wins[None]}"
-    tally += f"(記録 {len(current)}/{len(pairs)}組)"
+    tally += f"(記録 {n_current}/{len(rows)}組)"
     embed = {
         "title": f"アーティファクト戦 {region['label']} {date_label(start, region, with_time=True)} の結果",
         "url": PAGE,
@@ -179,7 +270,7 @@ def build_message(region, start, pairs):
         "color": 0x8B5CF6,
         "fields": [{"name": "今回の勝敗", "value": tally}],
     }
-    return {"username": "アーティファクト戦", "embeds": [embed]}, len(current)
+    return {"username": "アーティファクト戦", "embeds": [embed]}, n_current
 
 
 def load_state():
@@ -241,6 +332,15 @@ def main():
                     failed = True
                     continue
 
+        # 組み合わせは毎回変わりうるので、DaevaOS を読む前に公式のお知らせで確かめる
+        try:
+            matching = fetch_matching(start)
+        except Exception as e:  # noqa: BLE001 次の起動で読み直す
+            print(f"{name} 公式の組み合わせを読めません: {e}")
+            failed = True
+            continue
+        print(f"{name} 組み合わせ: {matching['title']}({len(matching['pairs'])}組)")
+
         try:
             page = Path(args.file).read_text(encoding="utf-8") if args.file else fetch_page()
         except Exception as e:  # noqa: BLE001 次の起動で読み直す
@@ -258,7 +358,10 @@ def main():
             print(f"{name} ページに {key} の組み合わせが見つかりません。ページの作りが変わった可能性があります")
             failed = True
             continue
-        message, n_current = build_message(region, start, pairs)
+        rows, stray = align(matching, pairs, start)
+        for a, b in stray:
+            print(f"{name} 公式の組み合わせに無い組の記録(投稿しない): {a} - {b}")
+        message, n_current = build_message(region, start, matching, rows)
         if n_current == 0 and not args.test and reads + 1 < EMPTY_RETRIES:
             print(f"{name} どの組み合わせもまだ記録なし。次の起動で読み直す({reads + 1}/{EMPTY_RETRIES} 回目)")
             continue
