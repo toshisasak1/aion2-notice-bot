@@ -5,6 +5,9 @@
 
 DaevaOS の運営者の許可を得て、戦が終わったあとにページを1回だけ読む。どの組み合わせも
 まだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
+
+DaevaOS に記録の無い組は、まとめサイト(vega-gaming-pc.com の「AF戦の組み合わせ・結果まとめ」)の
+表で補う。まとめにその回が載るのを開始から90分まで待ち、それでも無ければ DaevaOS だけで送る。
 GitHub Actions で notify.py と同じ起動(cron-job.org から30分ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
 
 環境変数:
@@ -18,6 +21,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -42,6 +46,10 @@ LAST_READ = timedelta(hours=24)  # これより遅れた回は送らない
 SIEGE_WINDOW = timedelta(minutes=60)  # 開始からこの間に終わった記録を、その回の結果とみなす
 EMPTY_RETRIES = 3  # どの組み合わせも記録が無いとき、この回数まで読み直す
 READ_CAP = 5  # 送信の失敗も含めて、1回の戦でページを読む上限
+# DaevaOS に記録の無い組を補う、プレイヤーの集計をまとめた記事(WordPress の API で探す)
+SUPPLEMENT_API = "https://vega-gaming-pc.com/wp-json/wp/v2/posts"
+SUPPLEMENT_SEARCH = "AF戦の組み合わせ"
+SUPPLEMENT_WAIT = timedelta(minutes=90)  # まとめにその回が載るのを、開始からこの時間まで待つ
 WEEKDAYS_JA = "月火水木金土日"
 MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
@@ -124,6 +132,70 @@ def fetch_matching(before):
         "right": right,
         "pairs": pairs,
     }
+
+
+def parse_supplement(content, matching_date, event_date):
+    """まとめ記事の表から、event_date の回の {(西部, 東部): (西部の数, 東部の数)} を読む。
+
+    表は組み合わせの発表日(data-af-matching)ごとに分かれ、セルに回の日付と両サーバー名が付いている。
+    """
+    found = {}
+    for t in re.finditer(r'<table[^>]*data-af-matching="([\d-]+)"[^>]*>(.*?)</table>', content, re.S):
+        if t.group(1) != matching_date:
+            continue
+        for td in re.finditer(r"<td([^>]*)>(.*?)</td>", t.group(2), re.S):
+            attrs = dict(re.findall(r'data-([\w-]+)="([^"]*)"', td.group(1)))
+            if attrs.get("event-date") != event_date or not attrs.get("west") or not attrs.get("east"):
+                continue
+            w = re.search(r'af2-side-west">\s*(\d)\s*<', td.group(2))
+            e = re.search(r'af2-side-east">\s*(\d)\s*<', td.group(2))
+            if w and e:
+                key = (html.unescape(attrs["west"]).strip(), html.unescape(attrs["east"]).strip())
+                found[key] = (int(w.group(1)), int(e.group(1)))
+    return found
+
+
+def fetch_supplement(region, matching, start):
+    """今の組み合わせのまとめ記事を探し、この回の結果を返す。載っていなければ空の dict。"""
+    url = (f"{SUPPLEMENT_API}?search={urllib.parse.quote(SUPPLEMENT_SEARCH)}"
+           "&per_page=5&_fields=link,content")
+    posts = http_json(url, headers={"User-Agent": UA}) or []
+    matching_date = matching["posted"].astimezone(region["tz"]).strftime("%Y-%m-%d")
+    event_date = start.astimezone(region["tz"]).strftime("%Y-%m-%d")
+    for post in posts:
+        found = parse_supplement((post.get("content") or {}).get("rendered", ""), matching_date, event_date)
+        if found:
+            return found
+    return {}
+
+
+def fill_from_supplement(rows, supplement):
+    """DaevaOS に今回の記録が無い組を、まとめの結果で埋める。埋めた組の数を返す。
+
+    両方にある組は DaevaOS を使い、食い違っていればログに出す。まとめには持っていた数しか無いので、
+    ■は数から作る。
+    """
+    filled = 0
+    for row in rows:
+        if (row["left"], row["right"]) in supplement:
+            a, b = supplement[(row["left"], row["right"])]
+        elif (row["right"], row["left"]) in supplement:
+            b, a = supplement[(row["right"], row["left"])]
+        else:
+            continue
+        if a + b > 3:
+            print(f"  まとめの数がおかしいので使わない: {row['left']} {a}-{b} {row['right']}")
+            continue
+        rec = row["rec"]
+        if rec and rec["current"]:
+            if tuple(rec["score"]) != (a, b):
+                print(f"  DaevaOS とまとめが食い違う(DaevaOS を使う): {row['left']} - {row['right']}"
+                      f" DaevaOS {rec['score'][0]}-{rec['score'][1]}、まとめ {a}-{b}")
+            continue
+        row["rec"] = {"ended": None, "current": True, "score": (a, b),
+                      "holders": ["L"] * a + [None] * (3 - a - b) + ["R"] * b}
+        filled += 1
+    return filled
 
 
 def parse_ended(text):
@@ -344,6 +416,21 @@ def main():
             continue
         print(f"{name} 組み合わせ: {matching['title']}({len(matching['pairs'])}組)")
 
+        # DaevaOS に記録の無い組はまとめサイトで補う。この回がまとめに載るまでは DaevaOS を読まずに待つ
+        try:
+            supplement = fetch_supplement(region, matching, start)
+        except Exception as e:  # noqa: BLE001 まとめが読めなくても DaevaOS だけで送れる
+            print(f"{name} まとめサイトを読めません: {e}")
+            supplement = {}
+        if supplement:
+            print(f"{name} まとめサイトにこの回の {len(supplement)} 組")
+        elif not args.test and now < start + SUPPLEMENT_WAIT:
+            print(f"{name} まとめサイトにこの回がまだ無い。"
+                  f"{date_label(start + SUPPLEMENT_WAIT, region, True)} まで待つ")
+            continue
+        else:
+            print(f"{name} まとめサイトにこの回が無いので、DaevaOS だけで送る")
+
         try:
             page = Path(args.file).read_text(encoding="utf-8") if args.file else fetch_page()
         except Exception as e:  # noqa: BLE001 次の起動で読み直す
@@ -364,6 +451,9 @@ def main():
         rows, stray = align(matching, pairs, start)
         for a, b in stray:
             print(f"{name} 公式の組み合わせに無い組の記録(投稿しない): {a} - {b}")
+        filled = fill_from_supplement(rows, supplement)
+        if filled:
+            print(f"{name} DaevaOS に記録の無い {filled} 組をまとめサイトで補った")
         message, n_current = build_message(region, start, matching, rows)
         if n_current == 0 and not args.test and reads + 1 < EMPTY_RETRIES:
             print(f"{name} どの組み合わせもまだ記録なし。次の起動で読み直す({reads + 1}/{EMPTY_RETRIES} 回目)")
