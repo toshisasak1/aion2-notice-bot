@@ -58,7 +58,7 @@ MAX_LINES = 10  # 要約の最大行数。行数は記事の中身に合わせ�
 DEFAULT_MODELS = ["gemini-3.5-flash", "gemini-flash-lite-latest"]
 
 
-def http_json(url, data=None, headers=None, timeout=30, retries=2):
+def http_json(url, data=None, headers=None, timeout=30, retries=2, method=None):
     body = json.dumps(data).encode("utf-8") if data is not None else None
     hdrs = {"User-Agent": UA, "Accept": "application/json"}
     if body is not None:
@@ -66,7 +66,7 @@ def http_json(url, data=None, headers=None, timeout=30, retries=2):
     hdrs.update(headers or {})
     last = None
     for attempt in range(retries + 1):
-        req = urllib.request.Request(url, data=body, headers=hdrs)
+        req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as res:
                 raw = res.read()

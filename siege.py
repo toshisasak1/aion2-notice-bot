@@ -3,11 +3,12 @@
 組み合わせは2週間ほどで変わるので、送る前に毎回、公式のお知らせ「サーバーマッチングのご案内」の
 最新版を読み、そのアビスの表の順に全組を並べる。DaevaOS に記録が無い組は「記録なし」と出す。
 
-DaevaOS の運営者の許可を得て、戦が終わったあとにページを1回だけ読む。どの組み合わせも
-まだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
+DaevaOS の運営者の許可を得て、開始から2時間半後(21:00 の戦なら 23:30)にページを1回だけ読む。
+どの組み合わせもまだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
 
 DaevaOS に記録の無い組は、まとめサイト(vega-gaming-pc.com の「AF戦の組み合わせ・結果まとめ」)の
-表で補う。まとめにその回が載るのを開始から90分まで待ち、それでも無ければ DaevaOS だけで送る。
+表で補う。それでも記録なしの組が残ったら、翌日 12:00 にまとめサイトを見直し、その組が埋まっていれば
+DaevaOS をもう1回読んで、送った投稿を書き換える。
 GitHub Actions で notify.py と同じ起動(cron-job.org から30分ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
 
 環境変数:
@@ -26,7 +27,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from notify import BOARDS, fetch_body, http_json, parse_time, post_discord, webhook_url
+from notify import BOARDS, fetch_body, http_json, parse_time, webhook_url
 
 PAGE = "https://daevaos.com/statistics/artifact-siege"
 UA = "Mozilla/5.0 (compatible; aion2-siege-bot/1.0; +https://github.com/toshisasak1/aion2-notice-bot)"
@@ -41,7 +42,8 @@ REGIONS = {
         "start": (21, 0),
     },
 }
-FIRST_READ = timedelta(minutes=40)  # 戦は最長30分。終わってから読む
+FIRST_READ = timedelta(hours=2, minutes=30)  # 戦は最長30分。まとめサイトに載るのも待って読む
+RECHECK_AT = timedelta(hours=15)  # 記録なしの組を確かめ直す時刻(21:00 の戦なら翌日 12:00)
 LAST_READ = timedelta(hours=24)  # これより遅れた回は送らない
 SIEGE_WINDOW = timedelta(minutes=60)  # 開始からこの間に終わった記録を、その回の結果とみなす
 EMPTY_RETRIES = 3  # どの組み合わせも記録が無いとき、この回数まで読み直す
@@ -49,7 +51,6 @@ READ_CAP = 5  # 送信の失敗も含めて、1回の戦でページを読む上
 # DaevaOS に記録の無い組を補う、プレイヤーの集計をまとめた記事(WordPress の API で探す)
 SUPPLEMENT_API = "https://vega-gaming-pc.com/wp-json/wp/v2/posts"
 SUPPLEMENT_SEARCH = "AF戦の組み合わせ"
-SUPPLEMENT_WAIT = timedelta(minutes=90)  # まとめにその回が載るのを、開始からこの時間まで待つ
 WEEKDAYS_JA = "月火水木金土日"
 MONTHS = {m: i for i, m in enumerate(
     ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
@@ -196,6 +197,24 @@ def fill_from_supplement(rows, supplement):
                       "holders": ["L"] * a + [None] * (3 - a - b) + ["R"] * b}
         filled += 1
     return filled
+
+
+def send_discord(message):
+    """投稿して、あとで書き換えられるようにメッセージの ID を返す。"""
+    res = http_json(webhook_url() + "?wait=true", message, retries=2)
+    time.sleep(1.2)  # ウェブフックの送信間隔の制限に合わせる
+    return (res or {}).get("id")
+
+
+def edit_discord(message_id, message):
+    # 書き換えで変えられるのは本文と埋め込みだけ(送信者名は送ったときのまま)
+    http_json(f"{webhook_url()}/messages/{message_id}", {"embeds": message["embeds"]},
+              retries=2, method="PATCH")
+    time.sleep(1.2)
+
+
+def missing_pairs(rows):
+    return [[row["left"], row["right"]] for row in rows if not (row["rec"] and row["rec"]["current"])]
 
 
 def parse_ended(text):
@@ -386,15 +405,25 @@ def main():
         rs = state.setdefault(key, {})
         name = f"[{region['label']} {date_label(start, region, with_time=True)}]"
         reads = rs.get("reads", {}).get(sid, 0)
+        recheck = None  # 送った投稿を書き換えるかを確かめ直すときの、送ったときの記録
         if not args.test:
             if rs.get("posted") == sid:
-                print(f"{name} 送信済み")
-                continue
-            if now < start + FIRST_READ:
+                recheck = rs.get("recheck")
+                if not recheck or recheck.get("sid") != sid:
+                    print(f"{name} 送信済み")
+                    continue
+                if now < start + RECHECK_AT:
+                    print(f"{name} 送信済み。記録なしの組は"
+                          f" {date_label(start + RECHECK_AT, region, True)} 以降に確かめ直す")
+                    continue
+            elif now < start + FIRST_READ:
                 print(f"{name} 戦の終了待ち({date_label(start + FIRST_READ, region, True)} 以降に読む)")
                 continue
             if now > start + LAST_READ:
                 print(f"{name} 開始から {LAST_READ.total_seconds() / 3600:.0f} 時間を過ぎたので送らない")
+                if recheck and keep_state:
+                    rs.pop("recheck", None)
+                    save_state(state)
                 continue
             if reads >= READ_CAP:
                 print(f"{name} ページを {READ_CAP} 回読んだので、この回はあきらめる")
@@ -416,20 +445,24 @@ def main():
             continue
         print(f"{name} 組み合わせ: {matching['title']}({len(matching['pairs'])}組)")
 
-        # DaevaOS に記録の無い組はまとめサイトで補う。この回がまとめに載るまでは DaevaOS を読まずに待つ
+        # DaevaOS に記録の無い組はまとめサイトで補う
         try:
             supplement = fetch_supplement(region, matching, start)
         except Exception as e:  # noqa: BLE001 まとめが読めなくても DaevaOS だけで送れる
             print(f"{name} まとめサイトを読めません: {e}")
             supplement = {}
-        if supplement:
-            print(f"{name} まとめサイトにこの回の {len(supplement)} 組")
-        elif not args.test and now < start + SUPPLEMENT_WAIT:
-            print(f"{name} まとめサイトにこの回がまだ無い。"
-                  f"{date_label(start + SUPPLEMENT_WAIT, region, True)} まで待つ")
-            continue
-        else:
-            print(f"{name} まとめサイトにこの回が無いので、DaevaOS だけで送る")
+        print(f"{name} まとめサイトにこの回の {len(supplement)} 組")
+
+        if recheck:
+            # 記録なしだった組がまとめで埋まったときだけ、DaevaOS を読み直して投稿を書き換える
+            new = [(a, b) for a, b in recheck["missing"] if (a, b) in supplement or (b, a) in supplement]
+            if not new:
+                print(f"{name} 記録なしだった {len(recheck['missing'])} 組は、まだ埋まっていない。書き換えない")
+                if keep_state:
+                    rs.pop("recheck", None)
+                    save_state(state)
+                continue
+            print(f"{name} 記録なしだった組のうち {len(new)} 組がまとめで埋まった。投稿を書き換える")
 
         try:
             page = Path(args.file).read_text(encoding="utf-8") if args.file else fetch_page()
@@ -455,16 +488,32 @@ def main():
         if filled:
             print(f"{name} DaevaOS に記録の無い {filled} 組をまとめサイトで補った")
         message, n_current = build_message(region, start, matching, rows)
-        if n_current == 0 and not args.test and reads + 1 < EMPTY_RETRIES:
+        missing = missing_pairs(rows)
+        if n_current == 0 and not recheck and not args.test and reads + 1 < EMPTY_RETRIES:
             print(f"{name} どの組み合わせもまだ記録なし。次の起動で読み直す({reads + 1}/{EMPTY_RETRIES} 回目)")
             continue
 
         if args.dry_run:
-            print(f"{name} (dry-run) 記録 {n_current}/{len(rows)} 組")
+            print(f"{name} (dry-run{'、書き換え' if recheck else ''}) 記録 {n_current}/{len(rows)} 組")
             print(json.dumps(message, ensure_ascii=False, indent=2))
             continue
+
+        if recheck:
+            try:
+                edit_discord(recheck["message_id"], message)
+            except Exception as e:  # noqa: BLE001 次の起動で書き換え直す
+                print(f"{name} Discord の投稿の書き換えに失敗: {e}")
+                failed = True
+                continue
+            print(f"{name} 投稿を書き換えました(記録 {recheck.get('n', '?')} → {n_current}/{len(rows)} 組)")
+            if keep_state:
+                rs.pop("recheck", None)
+                rs["reads"] = {}
+                save_state(state)
+            continue
+
         try:
-            post_discord(message)
+            message_id = send_discord(message)
         except Exception as e:  # noqa: BLE001 次の起動で送り直す
             print(f"{name} Discord への送信に失敗: {e}")
             failed = True
@@ -473,6 +522,12 @@ def main():
         if keep_state:
             rs["posted"] = sid
             rs["reads"] = {}
+            rs.pop("recheck", None)
+            if missing and message_id:
+                # 送った投稿を翌日に書き換えられるよう、ID と記録なしの組(結果ではなく組の名前)だけ残す
+                rs["recheck"] = {"sid": sid, "message_id": message_id, "missing": missing, "n": n_current}
+                print(f"{name} 記録なしの {len(missing)} 組は {date_label(start + RECHECK_AT, region, True)}"
+                      " 以降に確かめ直す")
             save_state(state)
 
     return 1 if failed else 0
