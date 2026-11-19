@@ -34,13 +34,15 @@ jobs:
       - name: 新着を確認して通知
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # クーポンコードの載った記事と、使用期限の前日のリマインドの送り先
+          COUPON_WEBHOOK_URL: ${{ secrets.COUPON_WEBHOOK_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           LATEST: ${{ inputs.latest || '0' }}
         run: python3 notify.py --latest "$LATEST"
 
       - name: アーティファクト戦の結果を通知
-        # 戦の後(月・木・土の21:40〜)でなければ、通信せずにすぐ終わる
+        # 戦の後(木・土の23:30〜)と翌日12:00の確かめ直しでなければ、通信せずにすぐ終わる
         if: always()
         env:
           # 専用のウェブフックが無ければ、新着通知と同じチャンネルに送る
