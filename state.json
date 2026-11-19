@@ -80,5 +80,19 @@
     "6aeafb1828c7452635072f33",
     "6afd5b00add8ebf0b13a72ab",
     "6afd6910cd0c2d6575c81332"
-  ]
+  ],
+  "coupon_checked": [
+    "6afd7720add8ebf0b13a7332"
+  ],
+  "coupons": {
+    "6afd7720add8ebf0b13a7332": {
+      "title": "[お知らせ]「最優秀賞」「人気ゲーム賞」受賞記念クーポンのご案内",
+      "url": "https://aion2.plaync.com/ja-jp/board/notice/view?articleId=50001023",
+      "codes": [
+        "THANKSFROMAION2"
+      ],
+      "ends": "2027-03-03T16:00:00+09:00",
+      "reminded": false
+    }
+  }
 }
