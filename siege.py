@@ -7,8 +7,8 @@ DaevaOS の運営者の許可を得て、開始から2時間半後(21:00 の戦�
 どの組み合わせもまだ記録されていないときだけ、次の起動で読み直す(1回の戦につき最大3回)。
 
 DaevaOS に記録の無い組は、まとめサイト(vega-gaming-pc.com の「AF戦の組み合わせ・結果まとめ」)の
-表で補う。それでも記録なしの組が残ったら、翌日 12:00 にまとめサイトを見直し、その組が埋まっていれば
-DaevaOS をもう1回読んで、送った投稿を書き換える。
+表で補う。それでも記録なしの組が残ったら、翌日 12:00 に DaevaOS とまとめサイトをもう1回読み、
+その組が埋まっていれば、送った投稿を書き換える。
 GitHub Actions で notify.py と同じ起動(cron-job.org から30分ごと)から呼ばれ、戦の後でなければ通信せずに終わる。
 
 環境変数:
@@ -52,22 +52,21 @@ READ_CAP = 5  # 送信の失敗も含めて、1回の戦でページを読む上
 SUPPLEMENT_API = "https://vega-gaming-pc.com/wp-json/wp/v2/posts"
 SUPPLEMENT_SEARCH = "AF戦の組み合わせ"
 WEEKDAYS_JA = "月火水木金土日"
-MONTHS = {m: i for i, m in enumerate(
-    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"], 1)}
-FACTION = {"elyos": "天族", "asmodian": "魔族"}
+ENDED_STATE = 3  # DaevaOS のデータで、戦が終わった回の state
 SQUARE = {"L": "🟦", "R": "🟥", None: "⬜"}  # 左のサーバー、右のサーバー、どちらも持っていない
 
 NOTICE_BOARD = next(b for b in BOARDS if b["key"] == "notice")
 MATCHING_TITLE = "サーバーマッチング"
 MATCHING_PAGES = 3  # お知らせを20件ずつ、この回数まで遡って探す
-# 公式のお知らせのサーバー名(日本語)と、DaevaOS の表示名。サーバーが増えたらここに足す
+# 公式のお知らせのサーバー名(日本語)と、DaevaOS のサーバー番号。サーバーが増えたらここに足す。
+# 番号は DaevaOS のページのスクリプトにあるサーバー一覧(GLOBAL_ASIA)から取った
 SERVER_NAMES = {
-    "シエル": "Siel", "アリエル": "Ariel", "イズラフェル": "Israphel", "ルミエル": "Lumiel",
-    "ネザカン": "Nezekan", "ネモン": "Nemon", "ジケル": "Zikel", "マルクタン": "Marchutan",
-    "バイゼル": "Vaizel", "エレスギガル": "Ereshkigal", "カイジネル": "Kaisinel", "ヒタニエ": "Hithanya",
-    "ユスティエル": "Yustiel", "トリニエル": "Triniel", "フレギオン": "Fregion", "ナニア": "Nania",
-    "ミスランテイダ": "Meslamtaeda", "アスフェル": "Azphel", "ベリトラ": "Beritra", "ハダル": "Hadala",
+    "シエル": 1501, "ネザカン": 1502, "バイゼル": 1503, "カイジネル": 1504, "ユスティエル": 1505,
+    "アリエル": 1506, "フレギオン": 1507, "ミスランテイダ": 1508, "ヒタニエ": 1509, "ナニア": 1510,
+    "イズラフェル": 2501, "ジケル": 2502, "トリニエル": 2503, "ルミエル": 2504, "マルクタン": 2505,
+    "アスフェル": 2506, "エレスギガル": 2507, "ベリトラ": 2508, "ネモン": 2509, "ハダル": 2510,
 }
+SERVER_IDS = {v: k for k, v in SERVER_NAMES.items()}
 
 
 def fetch_page(retries=2):
@@ -217,46 +216,45 @@ def missing_pairs(rows):
     return [[row["left"], row["right"]] for row in rows if not (row["rec"] and row["rec"]["current"])]
 
 
-def parse_ended(text):
-    """'Nov 5, 2026, 12:14'(UTC で表示される)を datetime にする。"""
-    m = re.fullmatch(r"([A-Z][a-z]{2}) (\d{1,2}), (\d{4}), (\d{1,2}):(\d{2})", text.strip())
-    if not m or m.group(1) not in MONTHS:
-        return None
-    mon, day, year, hour, minute = MONTHS[m.group(1)], *map(int, m.group(2, 3, 4, 5))
-    return datetime(year, mon, day, hour, minute, tzinfo=timezone.utc)
+def from_ms(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc) if ms else None
 
 
-def parse_region(page, key):
-    """地域の組み合わせを、ページに並んでいる順に返す。"""
-    m = re.search(rf'<div[^>]*data-testid="siege-region-group"[^>]*data-region="{key}"', page)
+def parse_rounds(page, key):
+    """地域の戦の記録(過去の回も含む)を新しい順に返す。読めなければ None。
+
+    画面の HTML は終了時刻をブラウザで埋めるようになった(2026-11-19 に気づいた)ので、
+    ページに埋め込まれた Next.js のデータ(self.__next_f)を読む。holders の race 1・2 は、
+    その回の elyos・asmodian の欄のサーバーを指す(同じ陣営どうしの組もこの欄で分かれる)。
+    """
+    chunks = re.findall(r'self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)', page)
+    data = "".join(json.loads(c) for c in chunks)
+    m = re.search(r'\{"region":"%s","rounds":' % re.escape(key), data)
     if not m:
-        return []
-    end = page.find('data-testid="siege-region-group"', m.end())
-    seg = page[m.end(): end if end >= 0 else len(page)]
-    pairs = []
-    for sec in re.findall(r'<section[^>]*data-testid="siege-pair".*?</section>', seg, re.S):
-        sides = re.findall(r'races/(elyos|asmodian)\.webp"[^>]*>\s*<span[^>]*title="([^"]*)"', sec)
-        score = re.search(r"<span[^>]*>(\d+)</span><span[^>]*>vs</span><span[^>]*>(\d+)</span>", sec)
-        if len(sides) != 2 or {f for f, _ in sides} != {"elyos", "asmodian"}:
+        return None
+    try:
+        group, _ = json.JSONDecoder().raw_decode(data, m.start())
+    except ValueError:
+        return None
+    rounds = []
+    for r in group.get("rounds") or []:
+        try:
+            sides = {1: r["elyos"], 2: r["asmodian"]}
+            ended = from_ms(r["rewardBaseMs"]) if r["state"] == ENDED_STATE else None
+            rounds.append({
+                "servers": (r["elyos"], r["asmodian"]),
+                "ended": ended,
+                "last_report": from_ms(r.get("lastReportMs")),
+                "winner": sides.get(r.get("winner")),
+                # アーティファクトの順に、持っていたサーバーの番号(どちらも持っていなければ None)
+                "holders": [sides.get(h["race"]) for h in sorted(r["holders"], key=lambda h: h["artifact"])],
+            })
+        except (KeyError, TypeError):
             continue
-        holders = []
-        for _, who in re.findall(r">Artifact (\d)</p><p[^>]*>([^<]*)</p>", sec):
-            who = who.strip().lower()
-            holders.append(who if who in FACTION else None)
-        status = re.search(r'data-status="([A-Z]+)"', sec)
-        ended = re.search(r">Ended ([^<]+)<", sec)
-        pair = {
-            "status": status.group(1) if status else "",
-            "ended": parse_ended(ended.group(1)) if ended else None,
-            "holders": holders,
-            "score": {},
-        }
-        for i, (faction, name) in enumerate(sides):
-            pair[faction] = html.unescape(name)
-            if score:
-                pair["score"][faction] = int(score.group(i + 1))
-        pairs.append(pair)
-    return pairs
+    if not any(r["ended"] for r in rounds):
+        return None  # 終わった回が1つも読めないのは、データの形が変わったとき
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted(rounds, key=lambda r: r["ended"] or oldest, reverse=True)
 
 
 def latest_start(region, now):
@@ -273,13 +271,8 @@ def latest_start(region, now):
     raise RuntimeError("戦の日程が見つかりません")
 
 
-def is_current(pair, start):
-    return (
-        pair["status"] == "ENDED"
-        and pair["ended"] is not None
-        and start <= pair["ended"] <= start + SIEGE_WINDOW
-        and len(pair["score"]) == 2
-    )
+def is_current(rnd, start):
+    return rnd["ended"] is not None and start <= rnd["ended"] <= start + SIEGE_WINDOW
 
 
 def date_label(dt, region, with_time=False):
@@ -294,35 +287,43 @@ def bar(holders):
     return "".join(SQUARE[h] for h in sorted(holders, key=lambda h: order[h]))
 
 
-def align(matching, pairs, start):
-    """公式の組ごとに、DaevaOS の記録を公式の表の左・右に合わせて並べる。
+def align(matching, rounds, start):
+    """公式の組ごとに、DaevaOS の今回か前回の記録を公式の表の左・右に合わせて並べる。
 
-    DaevaOS は同じ陣営どうしの組で片方を反対の陣営として表示するので、陣営ではなく
-    サーバー名で左右を決める。公式の組に無い DaevaOS の今回の記録は、2つ目の戻り値で返す。
+    DaevaOS は同じ陣営どうしの組で片方を反対の陣営として扱うので、陣営ではなく
+    サーバー番号で左右を決める。公式の組に無い DaevaOS の今回の記録は、2つ目の戻り値で返す。
     """
-    rows, used = [], set()
+    rows, known = [], set()
     for left, right in matching["pairs"]:
-        en = {SERVER_NAMES.get(left), SERVER_NAMES.get(right)}
+        ids = (SERVER_NAMES.get(left), SERVER_NAMES.get(right))
         for name in (left, right):
             if name not in SERVER_NAMES:
                 print(f"  SERVER_NAMES に無いサーバー: {name}(この組は記録なしになる)")
+        known.add(frozenset(ids))
         rec = None
-        for i, p in enumerate(pairs):
-            if None in en or {p.get("elyos"), p.get("asmodian")} != en:
+        for r in rounds:  # 新しい順なので、最初に当たった回を使う
+            if None in ids or set(r["servers"]) != set(ids) or not r["ended"] or r["ended"] > start + SIEGE_WINDOW:
                 continue
-            used.add(i)
-            side_l = "elyos" if p["elyos"] == SERVER_NAMES[left] else "asmodian"
-            side_r = "asmodian" if side_l == "elyos" else "elyos"
+            current = is_current(r, start)
+            holders = ["L" if h == ids[0] else "R" if h == ids[1] else None for h in r["holders"]]
+            a, b = holders.count("L"), holders.count("R")
+            # DaevaOS では、前の回の保持数が次の戦の最中の読み取りで上書きされることがある(勝者の欄は残る)。
+            # 今回の戦が始まった後に読まれた前の回と、保持数と勝者が食い違う回は使わない
+            if not current and r["last_report"] and r["last_report"] > start:
+                break
+            if a != b and r["winner"] is not None and r["winner"] != ids[0 if a > b else 1]:
+                print(f"  DaevaOS の保持数と勝者が食い違うので使わない: {left} {a}-{b} {right}")
+                break
             rec = {
-                "ended": p["ended"],
-                "current": is_current(p, start),
-                "score": (p["score"][side_l], p["score"][side_r]) if len(p["score"]) == 2 else None,
-                "holders": ["L" if h == side_l else "R" if h == side_r else None for h in p["holders"]],
+                "ended": r["ended"],
+                "current": current,
+                "score": (a, b),
+                "holders": holders,
             }
             break
         rows.append({"left": left, "right": right, "rec": rec})
-    stray = [(p.get("elyos"), p.get("asmodian")) for i, p in enumerate(pairs)
-             if i not in used and is_current(p, start)]
+    stray = [tuple(SERVER_IDS.get(s, str(s)) for s in r["servers"]) for r in rounds
+             if is_current(r, start) and frozenset(r["servers"]) not in known]
     return rows, stray
 
 
@@ -412,7 +413,7 @@ def main():
                 if not recheck or recheck.get("sid") != sid:
                     print(f"{name} 送信済み")
                     continue
-                if now < start + RECHECK_AT:
+                if now < start + RECHECK_AT and not recheck.get("redo"):
                     print(f"{name} 送信済み。記録なしの組は"
                           f" {date_label(start + RECHECK_AT, region, True)} 以降に確かめ直す")
                     continue
@@ -453,16 +454,13 @@ def main():
             supplement = {}
         print(f"{name} まとめサイトにこの回の {len(supplement)} 組")
 
-        if recheck:
-            # 記録なしだった組がまとめで埋まったときだけ、DaevaOS を読み直して投稿を書き換える
-            new = [(a, b) for a, b in recheck["missing"] if (a, b) in supplement or (b, a) in supplement]
-            if not new:
-                print(f"{name} 記録なしだった {len(recheck['missing'])} 組は、まだ埋まっていない。書き換えない")
-                if keep_state:
-                    rs.pop("recheck", None)
-                    save_state(state)
-                continue
-            print(f"{name} 記録なしだった組のうち {len(new)} 組がまとめで埋まった。投稿を書き換える")
+        redo = bool(recheck and recheck.get("redo"))
+        if redo:
+            # 読み取りの不具合で投稿が誤っていたときに、手で siege_state.json に redo を足して読み直させる
+            print(f"{name} 送った投稿を DaevaOS から読み直して書き換える")
+        elif recheck:
+            # DaevaOS の記録は、後からゲームに入った Companion の利用者の分が足されることがある
+            print(f"{name} 記録なしだった {len(recheck['missing'])} 組を DaevaOS とまとめで確かめ直す")
 
         try:
             page = Path(args.file).read_text(encoding="utf-8") if args.file else fetch_page()
@@ -476,12 +474,13 @@ def main():
         if page is None:
             continue
 
-        pairs = parse_region(page, key)
-        if not pairs:
-            print(f"{name} ページに {key} の組み合わせが見つかりません。ページの作りが変わった可能性があります")
+        rounds = parse_rounds(page, key)
+        if not rounds:
+            # 「記録なし」として送らずに止める(Actions の実行が失敗になり、次の起動で読み直す)
+            print(f"{name} ページから {key} の記録を読めません。ページの作りが変わった可能性があります")
             failed = True
             continue
-        rows, stray = align(matching, pairs, start)
+        rows, stray = align(matching, rounds, start)
         for a, b in stray:
             print(f"{name} 公式の組み合わせに無い組の記録(投稿しない): {a} - {b}")
         filled = fill_from_supplement(rows, supplement)
@@ -492,6 +491,17 @@ def main():
         if n_current == 0 and not recheck and not args.test and reads + 1 < EMPTY_RETRIES:
             print(f"{name} どの組み合わせもまだ記録なし。次の起動で読み直す({reads + 1}/{EMPTY_RETRIES} 回目)")
             continue
+        if recheck and not redo:
+            filled_now = [p for p in recheck["missing"] if p not in missing]
+            if n_current < recheck.get("n", 0):
+                filled_now = []  # 送ったときより記録が減るなら、何かがおかしいので書き換えない
+            if not filled_now:
+                print(f"{name} 記録なしだった {len(recheck['missing'])} 組は、まだ埋まっていない。書き換えない")
+                if keep_state:
+                    rs.pop("recheck", None)
+                    save_state(state)
+                continue
+            print(f"{name} 記録なしだった組のうち {len(filled_now)} 組が埋まった。投稿を書き換える")
 
         if args.dry_run:
             print(f"{name} (dry-run{'、書き換え' if recheck else ''}) 記録 {n_current}/{len(rows)} 組")
@@ -509,6 +519,10 @@ def main():
             if keep_state:
                 rs.pop("recheck", None)
                 rs["reads"] = {}
+                if missing and redo and now < start + RECHECK_AT:
+                    # 読み直して直した投稿も、記録なしの組が残れば予定どおり翌日に確かめ直す
+                    rs["recheck"] = {"sid": sid, "message_id": recheck["message_id"], "missing": missing,
+                                     "n": n_current}
                 save_state(state)
             continue
 
